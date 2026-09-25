@@ -1,0 +1,11 @@
+psram:
+  mode: quad
+
+display:
+  - platform: lilygo_t5_47
+    id: lilygo_t5_47_epaper
+    rotation: 90
+    update_interval: 60s
+    lambda: |-
+      it.rectangle(0, 0, it.get_width(), it.get_height());
+      it.filled_rectangle(10, 10, 100, 100, Color(128, 128, 128));
