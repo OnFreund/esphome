@@ -6,6 +6,7 @@
 #include "esphome/core/helpers.h"
 #include "esphome/core/log.h"
 
+#include <esp_lcd_panel_io.h>
 #include <soc/gpio_struct.h>
 
 #include <cstring>
@@ -15,15 +16,18 @@ namespace esphome::lilygo_t5_47 {
 static const char *const TAG = "lilygo_t5_47.display";
 
 static constexpr size_t BUFFER_ROW_BYTES = LilygoT547Display::WIDTH / 2;  // 4 bits per pixel
-static constexpr size_t PANEL_ROW_BYTES = LilygoT547Display::WIDTH / 4;   // 2 bits per pixel
-// Extra no-op bytes clocked out after each row to give the source driver some timing headroom.
-static constexpr size_t PANEL_ROW_PADDING_BYTES = 8;
+// 2 bits per pixel, plus some no-op bytes to give the source driver timing headroom
+static constexpr size_t BUS_ROW_BYTES = LilygoT547Display::WIDTH / 4 + 8;
+static constexpr size_t BUS_MAX_TRANSFER_BYTES = 256;
+static constexpr uint32_t BUS_CLOCK_HZ = 10 * 1000 * 1000;
+// The first pixel of each bus byte goes on panel lines D7/D6 (bus bits 1/0), the last on D1/D0.
+static constexpr uint8_t BUS_TO_DATA_PIN[8] = {6, 7, 4, 5, 2, 3, 0, 1};
 
-// Each pixel takes a 2-bit command on the data bus; the first pixel of a byte goes on D7/D6.
+// Each pixel takes a 2-bit command, starting with the least significant bits of a bus byte
 static constexpr uint8_t PIXEL_DARKEN = 0b01;
-static constexpr uint8_t PANEL_BYTE_NOOP = 0x00;
-static constexpr uint8_t PANEL_BYTE_DARKEN = 0x55;
-static constexpr uint8_t PANEL_BYTE_WHITEN = 0xAA;
+static constexpr uint8_t BUS_BYTE_NOOP = 0x00;
+static constexpr uint8_t BUS_BYTE_DARKEN = 0x55;
+static constexpr uint8_t BUS_BYTE_WHITEN = 0xAA;
 
 // All durations are in ticks of 0.1us.
 static constexpr uint32_t ROW_LOW_TICKS = 50;
@@ -33,15 +37,6 @@ static constexpr uint8_t CLEAR_FRAMES_PER_COLOR = 4;
 // Row drive time for each greyscale frame, darkest levels are driven in every frame.
 static constexpr uint16_t GREY_FRAME_TICKS[] = {30, 30, 20, 20, 30, 30, 30, 40, 40, 50, 50, 50, 100, 200, 300};
 static constexpr uint8_t GREY_LEVELS = 16;
-
-inline void HOT LilygoT547Display::set_data_bus_(uint8_t panel_byte) {
-  uint32_t low = this->data_set_low_[panel_byte];
-  uint32_t high = this->data_set_high_[panel_byte];
-  GPIO.out_w1ts = low;
-  GPIO.out_w1tc = this->data_mask_low_ ^ low;
-  GPIO.out1_w1ts.val = high;
-  GPIO.out1_w1tc.val = this->data_mask_high_ ^ high;
-}
 
 inline void HOT LilygoT547Display::wait_ticks_(uint32_t start_cycles, uint32_t ticks) {
   uint32_t cycles = ticks * this->cycles_per_tick_;
@@ -56,8 +51,7 @@ void LilygoT547Display::setup() {
     return;
   }
 
-  for (auto *pin : {this->cfg_data_pin_, this->cfg_clock_pin_, this->cfg_strobe_pin_, this->ckv_pin_, this->sth_pin_,
-                    this->ckh_pin_}) {
+  for (auto *pin : {this->cfg_data_pin_, this->cfg_clock_pin_, this->cfg_strobe_pin_, this->ckv_pin_}) {
     pin->setup();
     pin->digital_write(false);
   }
@@ -65,43 +59,60 @@ void LilygoT547Display::setup() {
   this->cfg_clock_ = make_fast_pin(this->cfg_clock_pin_);
   this->cfg_strobe_ = make_fast_pin(this->cfg_strobe_pin_);
   this->ckv_ = make_fast_pin(this->ckv_pin_);
-  this->sth_ = make_fast_pin(this->sth_pin_);
-  this->ckh_ = make_fast_pin(this->ckh_pin_);
 
-  for (auto *pin : this->data_pins_) {
-    pin->setup();
-    pin->digital_write(false);
-    uint8_t num = pin->get_pin();
-    if (num < 32) {
-      this->data_mask_low_ |= 1UL << num;
-    } else {
-      this->data_mask_high_ |= 1UL << (num - 32);
-    }
-  }
-  for (uint32_t value = 0; value < 256; value++) {
-    uint32_t low = 0, high = 0;
-    for (uint8_t bit = 0; bit < 8; bit++) {
-      if ((value & (1 << bit)) == 0)
-        continue;
-      uint8_t num = this->data_pins_[bit]->get_pin();
-      if (num < 32) {
-        low |= 1UL << num;
-      } else {
-        high |= 1UL << (num - 32);
-      }
-    }
-    this->data_set_low_[value] = low;
-    this->data_set_high_[value] = high;
+  if (!this->setup_bus_()) {
+    this->mark_failed();
+    return;
   }
 
   this->cycles_per_tick_ = arch_get_cpu_freq_hz() / 10000000;
-  // TEMPORARY diagnostic: check that the busy-wait timing is sane
-  uint32_t calibration_start = micros();
-  this->wait_us_(1000);
-  this->wait_calibration_us_ = micros() - calibration_start;
 
   this->config_ = CFG_POWER_DISABLE | CFG_STV | CFG_SCAN_DIRECTION;
   this->push_config_();
+}
+
+bool LilygoT547Display::setup_bus_() {
+  // The data lines, CKH (as write clock) and STH (as D/C line) are driven by the LCD peripheral
+  esp_lcd_i80_bus_config_t bus_config = {};
+  bus_config.dc_gpio_num = this->sth_pin_->get_pin();
+  bus_config.wr_gpio_num = this->ckh_pin_->get_pin();
+  bus_config.clk_src = LCD_CLK_SRC_DEFAULT;
+  for (size_t i = 0; i < 8; i++)
+    bus_config.data_gpio_nums[i] = this->data_pins_[BUS_TO_DATA_PIN[i]]->get_pin();
+  bus_config.bus_width = 8;
+  bus_config.max_transfer_bytes = BUS_MAX_TRANSFER_BYTES;
+  esp_err_t err = esp_lcd_new_i80_bus(&bus_config, &this->bus_);
+  if (err != ESP_OK) {
+    ESP_LOGE(TAG, "Could not create i80 bus: %s", esp_err_to_name(err));
+    return false;
+  }
+
+  // Every row is sent as a (dummy) command followed by the data. The command phase pulls STH high,
+  // the start pulse for the source driver is its falling edge when the data follows.
+  esp_lcd_panel_io_i80_config_t io_config = {};
+  io_config.cs_gpio_num = -1;
+  io_config.pclk_hz = BUS_CLOCK_HZ;
+  io_config.trans_queue_depth = 10;
+  io_config.on_color_trans_done = on_row_sent;
+  io_config.user_ctx = this;
+  io_config.lcd_cmd_bits = 10;
+  io_config.lcd_param_bits = 0;
+  io_config.dc_levels.dc_idle_level = 0;
+  io_config.dc_levels.dc_cmd_level = 1;
+  io_config.dc_levels.dc_dummy_level = 0;
+  io_config.dc_levels.dc_data_level = 0;
+  err = esp_lcd_new_panel_io_i80(this->bus_, &io_config, &this->io_);
+  if (err != ESP_OK) {
+    ESP_LOGE(TAG, "Could not create i80 panel IO: %s", esp_err_to_name(err));
+    return false;
+  }
+  return true;
+}
+
+bool IRAM_ATTR LilygoT547Display::on_row_sent(esp_lcd_panel_io_handle_t io, esp_lcd_panel_io_event_data_t *event,
+                                              void *user_ctx) {
+  static_cast<LilygoT547Display *>(user_ctx)->row_sent_ = true;
+  return false;
 }
 
 void LilygoT547Display::dump_config() {
@@ -116,11 +127,6 @@ void LilygoT547Display::dump_config() {
   LOG_PIN("  CKV Pin: ", this->ckv_pin_);
   LOG_PIN("  STH Pin: ", this->sth_pin_);
   LOG_PIN("  CKH Pin: ", this->ckh_pin_);
-  ESP_LOGCONFIG(TAG,
-                "  CPU frequency: %" PRIu32 " Hz\n"
-                "  CPU cycles per 0.1us: %" PRIu32 "\n"
-                "  1000us wait took: %" PRIu32 "us",
-                arch_get_cpu_freq_hz(), this->cycles_per_tick_, this->wait_calibration_us_);
   LOG_UPDATE_INTERVAL(this);
 }
 
@@ -173,106 +179,66 @@ void LilygoT547Display::fill(Color color) {
 void LilygoT547Display::display_() {
   uint32_t start_time = millis();
   this->power_on_();
-  uint32_t powered_time = millis();
   this->clear_panel_();
   uint32_t cleared_time = millis();
-  if (this->test_pattern_) {
-    this->draw_test_pattern_();
-  } else {
-    this->draw_greyscale_();
-  }
-  uint32_t drawn_time = millis();
+  this->draw_greyscale_();
   this->power_off_();
-  ESP_LOGD(TAG, "Refresh took %" PRIu32 "ms (power on %" PRIu32 "ms, clear %" PRIu32 "ms, draw %" PRIu32 "ms)",
-           millis() - start_time, powered_time - start_time, cleared_time - powered_time, drawn_time - cleared_time);
+  ESP_LOGD(TAG, "Refresh took %" PRIu32 "ms (clear %" PRIu32 "ms)", millis() - start_time, cleared_time - start_time);
 }
 
 void LilygoT547Display::clear_panel_() {
   // Alternate between black and white a few times to remove ghosting of the previous image, ending on white.
   for (uint8_t cycle = 0; cycle < CLEAR_CYCLES; cycle++) {
     for (uint8_t i = 0; i < CLEAR_FRAMES_PER_COLOR; i++)
-      this->draw_constant_frame_(PANEL_BYTE_DARKEN, CLEAR_FRAME_TICKS);
+      this->draw_constant_frame_(BUS_BYTE_DARKEN, CLEAR_FRAME_TICKS);
     for (uint8_t i = 0; i < CLEAR_FRAMES_PER_COLOR; i++)
-      this->draw_constant_frame_(PANEL_BYTE_WHITEN, CLEAR_FRAME_TICKS);
+      this->draw_constant_frame_(BUS_BYTE_WHITEN, CLEAR_FRAME_TICKS);
   }
 }
 
-void LilygoT547Display::draw_constant_frame_(uint8_t panel_byte, uint32_t row_ticks) {
+void LilygoT547Display::draw_constant_frame_(uint8_t bus_byte, uint32_t row_ticks) {
+  std::array<uint8_t, BUS_ROW_BYTES> row{};
+  std::fill_n(row.begin(), WIDTH / 4, bus_byte);
+
   this->start_frame_();
-  // Rows are pipelined: the data written after each row is latched out on the next one.
-  this->write_constant_row_(panel_byte);
-  for (int y = 0; y < HEIGHT; y++) {
-    this->output_row_(row_ticks);
-    this->write_constant_row_(panel_byte);
-  }
-  this->output_row_(row_ticks);
+  // Rows are pipelined: the row sent while one row is driven gets latched out for the next one.
+  this->send_row_(row.data());
+  for (int y = 0; y < HEIGHT; y++)
+    this->output_row_(row_ticks, row.data());
+  this->output_row_(row_ticks, nullptr);
   this->end_frame_();
   App.feed_wdt();
-}
-
-// TEMPORARY diagnostic: four horizontal bands that each try to darken their rows fully, isolating the data path
-// (constant vs. per-byte bus writes) from the row drive time.
-//   Band 1: per-byte writes, clear timing (50us per frame)
-//   Band 2: constant data, greyscale timing
-//   Band 3: per-byte writes, greyscale timing (what a black pixel gets in a normal draw)
-//   Band 4: per-byte writes, greyscale timing x5
-void LilygoT547Display::draw_test_pattern_() {
-  static constexpr int BAND_HEIGHT = HEIGHT / 4;
-  std::array<uint8_t, PANEL_ROW_BYTES> row;
-  row.fill(PANEL_BYTE_DARKEN);
-  for (uint32_t frame_ticks : GREY_FRAME_TICKS) {
-    this->start_frame_();
-    this->write_constant_row_(PANEL_BYTE_NOOP);
-    for (int y = 0; y < HEIGHT; y++) {
-      int band = y / BAND_HEIGHT;
-      uint32_t ticks = frame_ticks;
-      if (band == 0) {
-        ticks = CLEAR_FRAME_TICKS;
-      } else if (band == 3) {
-        ticks *= 5;
-      }
-      this->output_row_(ticks);
-      if (band == 1) {
-        this->write_constant_row_(PANEL_BYTE_DARKEN);
-      } else {
-        this->write_row_(row.data());
-      }
-    }
-    this->output_row_(frame_ticks);
-    this->end_frame_();
-    App.feed_wdt();
-  }
-  ESP_LOGI(TAG, "Test pattern drawn");
 }
 
 void HOT LilygoT547Display::draw_greyscale_() {
   // The panel is white at this point. Frame n darkens every pixel whose grey level is below
   // GREY_LEVELS - 1 - n, so darker pixels are driven for more (and longer) frames.
   std::array<uint8_t, 256> lut;
-  std::array<uint8_t, PANEL_ROW_BYTES> row;
-  for (uint8_t frame = 0; frame < GREY_LEVELS - 1; frame++) {
+  std::array<uint8_t, BUS_ROW_BYTES> row{};
+  std::array<uint8_t, BUS_ROW_BYTES> noop_row{};
+  uint8_t frame = 0;
+  for (uint32_t row_ticks : GREY_FRAME_TICKS) {
     // Map a buffer byte (two pixels, even pixel in the low nibble) to their two commands
     for (uint32_t value = 0; value < 256; value++) {
       uint8_t even = (value & 0x0F) + frame < GREY_LEVELS - 1 ? PIXEL_DARKEN : 0;
       uint8_t odd = (value >> 4) + frame < GREY_LEVELS - 1 ? PIXEL_DARKEN : 0;
-      lut[value] = (even << 2) | odd;
+      lut[value] = even | (odd << 2);
     }
 
-    uint32_t row_ticks = GREY_FRAME_TICKS[frame];
     const uint8_t *src = this->buffer_;
     this->start_frame_();
-    this->write_constant_row_(PANEL_BYTE_NOOP);
+    this->send_row_(noop_row.data());
     for (int y = 0; y < HEIGHT; y++) {
-      for (auto &out : row) {
-        out = (lut[src[0]] << 4) | lut[src[1]];
+      for (size_t i = 0; i < WIDTH / 4; i++) {
+        row[i] = lut[src[0]] | (lut[src[1]] << 4);
         src += 2;
       }
-      this->output_row_(row_ticks);
-      this->write_row_(row.data());
+      this->output_row_(row_ticks, row.data());
     }
-    this->output_row_(row_ticks);
+    this->output_row_(row_ticks, nullptr);
     this->end_frame_();
     App.feed_wdt();
+    frame++;
   }
 }
 
@@ -289,7 +255,6 @@ void LilygoT547Display::power_on_() {
   this->wait_us_(100);
   this->set_config_bits_(CFG_STV, true);
   this->push_config_();
-  this->sth_.high();
 }
 
 void LilygoT547Display::power_off_() {
@@ -325,6 +290,7 @@ void HOT LilygoT547Display::push_config_() {
 }
 
 void LilygoT547Display::start_frame_() {
+  this->wait_row_sent_();
   this->set_config_bits_(CFG_MODE, true);
   this->push_config_();
   this->pulse_ckv_(10, 10);
@@ -352,54 +318,40 @@ void LilygoT547Display::end_frame_() {
   this->pulse_ckv_(10, 10);
 }
 
-void HOT LilygoT547Display::output_row_(uint32_t high_ticks) {
-  // Latch the previously written row into the source driver outputs, then drive it for the requested time.
+void HOT LilygoT547Display::output_row_(uint32_t high_ticks, const uint8_t *next_row) {
+  // Latch the previously sent row into the source driver outputs and drive it for the requested time,
+  // sending the next row in the meantime.
+  this->wait_row_sent_();
   this->set_config_bits_(CFG_LATCH_ENABLE, true);
   this->push_config_();
   this->set_config_bits_(CFG_LATCH_ENABLE, false);
   this->push_config_();
-  this->pulse_ckv_(high_ticks, ROW_LOW_TICKS);
+
+  uint32_t start = arch_get_cpu_cycle_count();
+  this->ckv_.high();
+  if (next_row != nullptr)
+    this->send_row_(next_row);
+  this->wait_ticks_(start, high_ticks);
+  this->ckv_.low();
+  this->wait_ticks_(arch_get_cpu_cycle_count(), ROW_LOW_TICKS);
 }
 
-void HOT LilygoT547Display::write_row_(const uint8_t *panel_bytes) {
-  this->sth_.low();
-  for (size_t i = 0; i < PANEL_ROW_BYTES; i++) {
-    this->set_data_bus_(panel_bytes[i]);
-    this->ckh_.high();
-    this->ckh_.low();
-  }
-  this->set_data_bus_(PANEL_BYTE_NOOP);
-  for (size_t i = 0; i < PANEL_ROW_PADDING_BYTES; i++) {
-    this->ckh_.high();
-    this->ckh_.low();
-  }
-  this->sth_.high();
+void HOT LilygoT547Display::send_row_(const uint8_t *row) {
+  this->row_sent_ = false;
+  // The row is copied into the driver's DMA buffer before this returns
+  esp_lcd_panel_io_tx_color(this->io_, 0, row, BUS_ROW_BYTES);
 }
 
-void HOT LilygoT547Display::write_constant_row_(uint8_t panel_byte) {
-  this->set_data_bus_(panel_byte);
-  this->sth_.low();
-  for (size_t i = 0; i < PANEL_ROW_BYTES; i++) {
-    this->ckh_.high();
-    this->ckh_.low();
+void HOT LilygoT547Display::wait_row_sent_() {
+  while (!this->row_sent_) {
   }
-  this->set_data_bus_(PANEL_BYTE_NOOP);
-  for (size_t i = 0; i < PANEL_ROW_PADDING_BYTES; i++) {
-    this->ckh_.high();
-    this->ckh_.low();
-  }
-  this->sth_.high();
 }
 
 void HOT LilygoT547Display::pulse_ckv_(uint32_t high_ticks, uint32_t low_ticks) {
-  {
-    // The high time sets how long a row is driven, so keep interrupts from stretching it
-    InterruptLock lock;
-    uint32_t start = arch_get_cpu_cycle_count();
-    this->ckv_.high();
-    this->wait_ticks_(start, high_ticks);
-    this->ckv_.low();
-  }
+  uint32_t start = arch_get_cpu_cycle_count();
+  this->ckv_.high();
+  this->wait_ticks_(start, high_ticks);
+  this->ckv_.low();
   this->wait_ticks_(arch_get_cpu_cycle_count(), low_ticks);
 }
 

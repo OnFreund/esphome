@@ -8,6 +8,8 @@
 #include "esphome/core/macros.h"
 #include "esphome/core/version.h"
 
+#include <esp_lcd_io_i80.h>
+
 #include <array>
 
 namespace esphome::lilygo_t5_47 {
@@ -15,8 +17,9 @@ namespace esphome::lilygo_t5_47 {
 /// Driver for the ED047TC1 parallel e-paper panel on the LilyGo T5 4.7" (ESP32 version).
 ///
 /// The panel has no controller: the source/gate drivers are clocked directly. Control and power signals go
-/// through a 74HCT4094 shift register, pixel data is bit-banged over an 8-bit bus. Each refresh clears the
-/// panel to white and then darkens every pixel over 15 frames of increasing duration (16 grey levels).
+/// through a 74HCT4094 shift register, pixel data is sent over the 8-bit bus with the LCD (i80) peripheral.
+/// Each refresh clears the panel to white and then darkens every pixel over 15 frames of increasing duration
+/// (16 grey levels).
 class LilygoT547Display : public display::DisplayBuffer {
  public:
   static constexpr int WIDTH = 960;
@@ -42,7 +45,6 @@ class LilygoT547Display : public display::DisplayBuffer {
   void set_ckv_pin(InternalGPIOPin *pin) { this->ckv_pin_ = pin; }
   void set_sth_pin(InternalGPIOPin *pin) { this->sth_pin_ = pin; }
   void set_ckh_pin(InternalGPIOPin *pin) { this->ckh_pin_ = pin; }
-  void set_test_pattern(bool test_pattern) { this->test_pattern_ = test_pattern; }
 
  protected:
   /// Direct register access to a GPIO, bypassing the (slow) pin abstraction for the timing-critical paths.
@@ -74,12 +76,13 @@ class LilygoT547Display : public display::DisplayBuffer {
 
   static FastPin make_fast_pin(InternalGPIOPin *pin);
   static uint8_t color_to_grey(Color color);
+  static bool on_row_sent(esp_lcd_panel_io_handle_t io, esp_lcd_panel_io_event_data_t *event, void *user_ctx);
 
+  bool setup_bus_();
   void display_();
   void clear_panel_();
   void draw_greyscale_();
-  void draw_test_pattern_();
-  void draw_constant_frame_(uint8_t panel_byte, uint32_t row_ticks);
+  void draw_constant_frame_(uint8_t bus_byte, uint32_t row_ticks);
 
   void power_on_();
   void power_off_();
@@ -87,10 +90,9 @@ class LilygoT547Display : public display::DisplayBuffer {
   void push_config_();
   void start_frame_();
   void end_frame_();
-  void output_row_(uint32_t high_ticks);
-  void write_row_(const uint8_t *panel_bytes);
-  void write_constant_row_(uint8_t panel_byte);
-  void set_data_bus_(uint8_t panel_byte);
+  void output_row_(uint32_t high_ticks, const uint8_t *next_row);
+  void send_row_(const uint8_t *row);
+  void wait_row_sent_();
   void pulse_ckv_(uint32_t high_ticks, uint32_t low_ticks);
   void wait_ticks_(uint32_t start_cycles, uint32_t ticks);
   void wait_us_(uint32_t us) { this->wait_ticks_(arch_get_cpu_cycle_count(), us * 10); }
@@ -107,19 +109,13 @@ class LilygoT547Display : public display::DisplayBuffer {
   FastPin cfg_clock_{};
   FastPin cfg_strobe_{};
   FastPin ckv_{};
-  FastPin sth_{};
-  FastPin ckh_{};
 
-  /// GPIO register values to put a panel byte on the data bus, for pins 0-31 and 32-39 respectively.
-  std::array<uint32_t, 256> data_set_low_{};
-  std::array<uint32_t, 256> data_set_high_{};
-  uint32_t data_mask_low_{0};
-  uint32_t data_mask_high_{0};
+  esp_lcd_i80_bus_handle_t bus_{nullptr};
+  esp_lcd_panel_io_handle_t io_{nullptr};
+  volatile bool row_sent_{true};
 
   uint32_t cycles_per_tick_{0};  ///< CPU cycles per 0.1us
   uint8_t config_{0};
-  bool test_pattern_{false};
-  uint32_t wait_calibration_us_{0};
 };
 
 }  // namespace esphome::lilygo_t5_47
