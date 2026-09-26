@@ -5,6 +5,8 @@
 #include "esphome/components/display/display_buffer.h"
 #include "esphome/core/component.h"
 #include "esphome/core/hal.h"
+#include "esphome/core/macros.h"
+#include "esphome/core/version.h"
 
 #include <array>
 
@@ -28,8 +30,10 @@ class LilygoT547Display : public display::DisplayBuffer {
   display::DisplayType get_display_type() override { return display::DisplayType::DISPLAY_TYPE_GRAYSCALE; }
 
   void fill(Color color) override;
+#if ESPHOME_VERSION_CODE >= VERSION_CODE(2025, 11, 0)
   /// Clear to white, like real paper.
   void clear() override { this->fill(display::COLOR_ON); }
+#endif
 
   void set_data_pin(uint8_t index, InternalGPIOPin *pin) { this->data_pins_[index] = pin; }
   void set_cfg_data_pin(InternalGPIOPin *pin) { this->cfg_data_pin_ = pin; }

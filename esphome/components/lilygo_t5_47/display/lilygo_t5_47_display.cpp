@@ -102,10 +102,9 @@ void LilygoT547Display::setup() {
 
 void LilygoT547Display::dump_config() {
   LOG_DISPLAY("", "LilyGo T5 4.7\" E-Paper", this);
-  char summary[GPIO_SUMMARY_MAX_LEN];
   for (size_t i = 0; i < this->data_pins_.size(); i++) {
-    this->data_pins_[i]->dump_summary(summary, sizeof(summary));
-    ESP_LOGCONFIG(TAG, "  Data Pin D%u: %s", static_cast<unsigned>(i), summary);
+    ESP_LOGCONFIG(TAG, "  Data Pin D%u:", static_cast<unsigned>(i));
+    LOG_PIN("    ", this->data_pins_[i]);
   }
   LOG_PIN("  Config Data Pin: ", this->cfg_data_pin_);
   LOG_PIN("  Config Clock Pin: ", this->cfg_clock_pin_);
@@ -117,7 +116,19 @@ void LilygoT547Display::dump_config() {
 }
 
 void LilygoT547Display::update() {
+#if ESPHOME_VERSION_CODE < VERSION_CODE(2025, 11, 0)
+  // Display::clear() can't be overridden before 2025.11 and fills black, so auto-clear to white here instead
+  if (this->auto_clear_enabled_) {
+    this->fill(display::COLOR_ON);
+    this->auto_clear_enabled_ = false;
+    this->do_update_();
+    this->auto_clear_enabled_ = true;
+  } else {
+    this->do_update_();
+  }
+#else
   this->do_update_();
+#endif
   this->display_();
 }
 
