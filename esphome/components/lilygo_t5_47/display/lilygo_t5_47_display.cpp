@@ -95,6 +95,10 @@ void LilygoT547Display::setup() {
   }
 
   this->cycles_per_tick_ = arch_get_cpu_freq_hz() / 10000000;
+  // TEMPORARY diagnostic: check that the busy-wait timing is sane
+  uint32_t calibration_start = micros();
+  this->wait_us_(1000);
+  this->wait_calibration_us_ = micros() - calibration_start;
 
   this->config_ = CFG_POWER_DISABLE | CFG_STV | CFG_SCAN_DIRECTION;
   this->push_config_();
@@ -112,6 +116,11 @@ void LilygoT547Display::dump_config() {
   LOG_PIN("  CKV Pin: ", this->ckv_pin_);
   LOG_PIN("  STH Pin: ", this->sth_pin_);
   LOG_PIN("  CKH Pin: ", this->ckh_pin_);
+  ESP_LOGCONFIG(TAG,
+                "  CPU frequency: %" PRIu32 " Hz\n"
+                "  CPU cycles per 0.1us: %" PRIu32 "\n"
+                "  1000us wait took: %" PRIu32 "us",
+                arch_get_cpu_freq_hz(), this->cycles_per_tick_, this->wait_calibration_us_);
   LOG_UPDATE_INTERVAL(this);
 }
 
@@ -164,14 +173,18 @@ void LilygoT547Display::fill(Color color) {
 void LilygoT547Display::display_() {
   uint32_t start_time = millis();
   this->power_on_();
+  uint32_t powered_time = millis();
   this->clear_panel_();
+  uint32_t cleared_time = millis();
   if (this->test_pattern_) {
     this->draw_test_pattern_();
   } else {
     this->draw_greyscale_();
   }
+  uint32_t drawn_time = millis();
   this->power_off_();
-  ESP_LOGD(TAG, "Refresh took %" PRIu32 "ms", millis() - start_time);
+  ESP_LOGD(TAG, "Refresh took %" PRIu32 "ms (power on %" PRIu32 "ms, clear %" PRIu32 "ms, draw %" PRIu32 "ms)",
+           millis() - start_time, powered_time - start_time, cleared_time - powered_time, drawn_time - cleared_time);
 }
 
 void LilygoT547Display::clear_panel_() {

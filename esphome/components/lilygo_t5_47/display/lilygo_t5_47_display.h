@@ -119,6 +119,7 @@ class LilygoT547Display : public display::DisplayBuffer {
   uint32_t cycles_per_tick_{0};  ///< CPU cycles per 0.1us
   uint8_t config_{0};
   bool test_pattern_{false};
+  uint32_t wait_calibration_us_{0};
 };
 
 }  // namespace esphome::lilygo_t5_47
