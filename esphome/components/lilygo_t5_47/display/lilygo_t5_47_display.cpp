@@ -207,12 +207,12 @@ void LilygoT547Display::draw_test_pattern_() {
   static constexpr int BAND_HEIGHT = HEIGHT / 4;
   std::array<uint8_t, PANEL_ROW_BYTES> row;
   row.fill(PANEL_BYTE_DARKEN);
-  for (uint8_t frame = 0; frame < GREY_LEVELS - 1; frame++) {
+  for (uint32_t frame_ticks : GREY_FRAME_TICKS) {
     this->start_frame_();
     this->write_constant_row_(PANEL_BYTE_NOOP);
     for (int y = 0; y < HEIGHT; y++) {
       int band = y / BAND_HEIGHT;
-      uint32_t ticks = GREY_FRAME_TICKS[frame];
+      uint32_t ticks = frame_ticks;
       if (band == 0) {
         ticks = CLEAR_FRAME_TICKS;
       } else if (band == 3) {
@@ -225,7 +225,7 @@ void LilygoT547Display::draw_test_pattern_() {
         this->write_row_(row.data());
       }
     }
-    this->output_row_(GREY_FRAME_TICKS[frame]);
+    this->output_row_(frame_ticks);
     this->end_frame_();
     App.feed_wdt();
   }
