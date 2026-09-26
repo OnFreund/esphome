@@ -67,8 +67,8 @@ class LilygoT547Display : public display::DisplayBuffer {
   int get_height_internal() override { return HEIGHT; }
   void draw_absolute_pixel_internal(int x, int y, Color color) override;
 
-  static FastPin make_fast_pin_(InternalGPIOPin *pin);
-  static uint8_t color_to_grey_(Color color);
+  static FastPin make_fast_pin(InternalGPIOPin *pin);
+  static uint8_t color_to_grey(Color color);
 
   void display_();
   void clear_panel_();

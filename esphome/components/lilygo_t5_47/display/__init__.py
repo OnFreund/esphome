@@ -3,6 +3,7 @@ import esphome.codegen as cg
 from esphome.components import display, esp32
 import esphome.config_validation as cv
 from esphome.const import (
+    CONF_DATA_PINS,
     CONF_ID,
     CONF_IGNORE_STRAPPING_WARNING,
     CONF_LAMBDA,
@@ -18,7 +19,6 @@ CONF_CFG_DATA_PIN = "cfg_data_pin"
 CONF_CFG_STROBE_PIN = "cfg_strobe_pin"
 CONF_CKH_PIN = "ckh_pin"
 CONF_CKV_PIN = "ckv_pin"
-CONF_DATA_PINS = "data_pins"
 CONF_STH_PIN = "sth_pin"
 
 LilygoT547Display = lilygo_t5_47_ns.class_("LilygoT547Display", display.DisplayBuffer)

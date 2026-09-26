@@ -6,7 +6,7 @@
 #include "esphome/core/helpers.h"
 #include "esphome/core/log.h"
 
-#include <soc/gpio_reg.h>
+#include <soc/gpio_struct.h>
 
 #include <cstring>
 
@@ -37,10 +37,10 @@ static constexpr uint8_t GREY_LEVELS = 16;
 inline void HOT LilygoT547Display::set_data_bus_(uint8_t panel_byte) {
   uint32_t low = this->data_set_low_[panel_byte];
   uint32_t high = this->data_set_high_[panel_byte];
-  REG_WRITE(GPIO_OUT_W1TS_REG, low);
-  REG_WRITE(GPIO_OUT_W1TC_REG, this->data_mask_low_ ^ low);
-  REG_WRITE(GPIO_OUT1_W1TS_REG, high);
-  REG_WRITE(GPIO_OUT1_W1TC_REG, this->data_mask_high_ ^ high);
+  GPIO.out_w1ts = low;
+  GPIO.out_w1tc = this->data_mask_low_ ^ low;
+  GPIO.out1_w1ts.val = high;
+  GPIO.out1_w1tc.val = this->data_mask_high_ ^ high;
 }
 
 inline void HOT LilygoT547Display::wait_ticks_(uint32_t start_cycles, uint32_t ticks) {
@@ -61,12 +61,12 @@ void LilygoT547Display::setup() {
     pin->setup();
     pin->digital_write(false);
   }
-  this->cfg_data_ = make_fast_pin_(this->cfg_data_pin_);
-  this->cfg_clock_ = make_fast_pin_(this->cfg_clock_pin_);
-  this->cfg_strobe_ = make_fast_pin_(this->cfg_strobe_pin_);
-  this->ckv_ = make_fast_pin_(this->ckv_pin_);
-  this->sth_ = make_fast_pin_(this->sth_pin_);
-  this->ckh_ = make_fast_pin_(this->ckh_pin_);
+  this->cfg_data_ = make_fast_pin(this->cfg_data_pin_);
+  this->cfg_clock_ = make_fast_pin(this->cfg_clock_pin_);
+  this->cfg_strobe_ = make_fast_pin(this->cfg_strobe_pin_);
+  this->ckv_ = make_fast_pin(this->ckv_pin_);
+  this->sth_ = make_fast_pin(this->sth_pin_);
+  this->ckh_ = make_fast_pin(this->ckh_pin_);
 
   for (auto *pin : this->data_pins_) {
     pin->setup();
@@ -121,7 +121,7 @@ void LilygoT547Display::update() {
   this->display_();
 }
 
-uint8_t LilygoT547Display::color_to_grey_(Color color) {
+uint8_t LilygoT547Display::color_to_grey(Color color) {
   // Luminance scaled to 0 (black) .. 15 (white)
   return (color.r * 77 + color.g * 150 + color.b * 29) >> 12;
 }
@@ -130,7 +130,7 @@ void HOT LilygoT547Display::draw_absolute_pixel_internal(int x, int y, Color col
   if (x < 0 || x >= WIDTH || y < 0 || y >= HEIGHT)
     return;
 
-  uint8_t grey = color_to_grey_(color);
+  uint8_t grey = color_to_grey(color);
   uint8_t *pos = &this->buffer_[y * BUFFER_ROW_BYTES + x / 2];
   if (x & 1) {
     *pos = (*pos & 0x0F) | (grey << 4);
@@ -146,7 +146,7 @@ void LilygoT547Display::fill(Color color) {
     return;
   }
 
-  uint8_t grey = color_to_grey_(color);
+  uint8_t grey = color_to_grey(color);
   memset(this->buffer_, (grey << 4) | grey, BUFFER_ROW_BYTES * HEIGHT);
 }
 
@@ -340,14 +340,11 @@ void HOT LilygoT547Display::pulse_ckv_(uint32_t high_ticks, uint32_t low_ticks) 
   this->wait_ticks_(arch_get_cpu_cycle_count(), low_ticks);
 }
 
-LilygoT547Display::FastPin LilygoT547Display::make_fast_pin_(InternalGPIOPin *pin) {
+LilygoT547Display::FastPin LilygoT547Display::make_fast_pin(InternalGPIOPin *pin) {
   uint8_t num = pin->get_pin();
-  if (num < 32) {
-    return {reinterpret_cast<volatile uint32_t *>(GPIO_OUT_W1TS_REG),
-            reinterpret_cast<volatile uint32_t *>(GPIO_OUT_W1TC_REG), 1UL << num};
-  }
-  return {reinterpret_cast<volatile uint32_t *>(GPIO_OUT1_W1TS_REG),
-          reinterpret_cast<volatile uint32_t *>(GPIO_OUT1_W1TC_REG), 1UL << (num - 32)};
+  if (num < 32)
+    return {&GPIO.out_w1ts, &GPIO.out_w1tc, 1UL << num};
+  return {&GPIO.out1_w1ts.val, &GPIO.out1_w1tc.val, 1UL << (num - 32)};
 }
 
 }  // namespace esphome::lilygo_t5_47
