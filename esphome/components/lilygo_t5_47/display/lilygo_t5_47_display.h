@@ -42,6 +42,7 @@ class LilygoT547Display : public display::DisplayBuffer {
   void set_ckv_pin(InternalGPIOPin *pin) { this->ckv_pin_ = pin; }
   void set_sth_pin(InternalGPIOPin *pin) { this->sth_pin_ = pin; }
   void set_ckh_pin(InternalGPIOPin *pin) { this->ckh_pin_ = pin; }
+  void set_test_pattern(bool test_pattern) { this->test_pattern_ = test_pattern; }
 
  protected:
   /// Direct register access to a GPIO, bypassing the (slow) pin abstraction for the timing-critical paths.
@@ -77,6 +78,7 @@ class LilygoT547Display : public display::DisplayBuffer {
   void display_();
   void clear_panel_();
   void draw_greyscale_();
+  void draw_test_pattern_();
   void draw_constant_frame_(uint8_t panel_byte, uint32_t row_ticks);
 
   void power_on_();
@@ -116,6 +118,7 @@ class LilygoT547Display : public display::DisplayBuffer {
 
   uint32_t cycles_per_tick_{0};  ///< CPU cycles per 0.1us
   uint8_t config_{0};
+  bool test_pattern_{false};
 };
 
 }  // namespace esphome::lilygo_t5_47

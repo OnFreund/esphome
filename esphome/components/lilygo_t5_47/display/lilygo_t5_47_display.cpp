@@ -165,7 +165,11 @@ void LilygoT547Display::display_() {
   uint32_t start_time = millis();
   this->power_on_();
   this->clear_panel_();
-  this->draw_greyscale_();
+  if (this->test_pattern_) {
+    this->draw_test_pattern_();
+  } else {
+    this->draw_greyscale_();
+  }
   this->power_off_();
   ESP_LOGD(TAG, "Refresh took %" PRIu32 "ms", millis() - start_time);
 }
@@ -191,6 +195,41 @@ void LilygoT547Display::draw_constant_frame_(uint8_t panel_byte, uint32_t row_ti
   this->output_row_(row_ticks);
   this->end_frame_();
   App.feed_wdt();
+}
+
+// TEMPORARY diagnostic: four horizontal bands that each try to darken their rows fully, isolating the data path
+// (constant vs. per-byte bus writes) from the row drive time.
+//   Band 1: per-byte writes, clear timing (50us per frame)
+//   Band 2: constant data, greyscale timing
+//   Band 3: per-byte writes, greyscale timing (what a black pixel gets in a normal draw)
+//   Band 4: per-byte writes, greyscale timing x5
+void LilygoT547Display::draw_test_pattern_() {
+  static constexpr int BAND_HEIGHT = HEIGHT / 4;
+  std::array<uint8_t, PANEL_ROW_BYTES> row;
+  row.fill(PANEL_BYTE_DARKEN);
+  for (uint8_t frame = 0; frame < GREY_LEVELS - 1; frame++) {
+    this->start_frame_();
+    this->write_constant_row_(PANEL_BYTE_NOOP);
+    for (int y = 0; y < HEIGHT; y++) {
+      int band = y / BAND_HEIGHT;
+      uint32_t ticks = GREY_FRAME_TICKS[frame];
+      if (band == 0) {
+        ticks = CLEAR_FRAME_TICKS;
+      } else if (band == 3) {
+        ticks *= 5;
+      }
+      this->output_row_(ticks);
+      if (band == 1) {
+        this->write_constant_row_(PANEL_BYTE_DARKEN);
+      } else {
+        this->write_row_(row.data());
+      }
+    }
+    this->output_row_(GREY_FRAME_TICKS[frame]);
+    this->end_frame_();
+    App.feed_wdt();
+  }
+  ESP_LOGI(TAG, "Test pattern drawn");
 }
 
 void HOT LilygoT547Display::draw_greyscale_() {

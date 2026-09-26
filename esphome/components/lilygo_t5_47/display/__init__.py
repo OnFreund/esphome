@@ -20,6 +20,7 @@ CONF_CFG_STROBE_PIN = "cfg_strobe_pin"
 CONF_CKH_PIN = "ckh_pin"
 CONF_CKV_PIN = "ckv_pin"
 CONF_STH_PIN = "sth_pin"
+CONF_TEST_PATTERN = "test_pattern"
 
 LilygoT547Display = lilygo_t5_47_ns.class_("LilygoT547Display", display.DisplayBuffer)
 
@@ -53,6 +54,8 @@ CONFIG_SCHEMA = cv.All(
             cv.Optional(
                 CONF_CKH_PIN, default=_strapping_pin(5)
             ): pins.internal_gpio_output_pin_schema,
+            # Temporary diagnostic, see draw_test_pattern_()
+            cv.Optional(CONF_TEST_PATTERN, default=False): cv.boolean,
         }
     ).extend(cv.polling_component_schema("60s")),
     esp32.only_on_variant(supported=[esp32.VARIANT_ESP32]),
@@ -68,6 +71,8 @@ async def to_code(config):
             config[CONF_LAMBDA], [(display.DisplayRef, "it")], return_type=cg.void
         )
         cg.add(var.set_writer(lambda_))
+
+    cg.add(var.set_test_pattern(config[CONF_TEST_PATTERN]))
 
     for index, pin_config in enumerate(config[CONF_DATA_PINS]):
         pin = await cg.gpio_pin_expression(pin_config)
